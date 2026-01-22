@@ -88,7 +88,7 @@ router.post("/subscription", async (req, res) => {
     //     to give exactly the discount you want (e.g. same % as commission).
     // For a fully dynamic wallet, you would need to integrate Shopify Admin API and generate one-off codes.
     log("[Seal webhook] Applying discount code to subscription");
-    await applyDiscountCode(subscriptionId, config.subscriptionDiscountCode);
+    await applyDiscountCode(subscriptionId, config.subscriptionDiscountCode, customerEmail);
 
     // 2) Reduce affiliate commission balance in UpPromote by amountToUse
     log("[Seal webhook] Consuming credit for customer");

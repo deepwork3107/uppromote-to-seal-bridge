@@ -6,6 +6,7 @@ const router = express.Router();
 const config = require("../config");
 const { log, error } = require("../utils/logger");
 const { storeReferralCredit } = require("../services/creditService");
+const { getSubscriptionsAndApplyDiscount } = require("../services/sealClient");
 
 /**
  * Verify X-UpPromote-Signature header using HMAC-SHA256
@@ -99,6 +100,51 @@ router.post("/referral-approved", async (req, res) => {
     } catch (logicErr) {
       error("[UpPromote] Error in storeReferralCredit:", logicErr);
       // Do not fail the webhook for internal logic errors
+    }
+
+    // 5) Extract email from webhook payload (try multiple fields)
+    // Priority: customer_email > customer?.email > affiliate?.email > email
+    const customerEmail = 
+      payload.customer_email || 
+      payload.customer?.email || 
+      payload.affiliate?.email || 
+      payload.email;
+
+    if (customerEmail) {
+      try {
+        log("[UpPromote] Extracted email from webhook", {
+          email: customerEmail,
+          referralId: payload.id,
+          source: payload.customer_email ? 'customer_email' : 
+                  payload.customer?.email ? 'customer.email' :
+                  payload.affiliate?.email ? 'affiliate.email' : 'email'
+        });
+
+        // Find Seal subscriptions and apply discount codes
+        const result = await getSubscriptionsAndApplyDiscount(customerEmail);
+        log("[UpPromote] Processed Seal subscriptions and applied discounts", {
+          customerEmail,
+          referralId: payload.id,
+          subscriptionIds: result.subscriptionIds,
+          appliedCount: result.appliedDiscounts?.length || 0,
+          success: result.success
+        });
+        
+        if (result.errors && result.errors.length > 0) {
+          error("[UpPromote] Some subscriptions failed to get discount applied", {
+            customerEmail,
+            errors: result.errors
+          });
+        }
+      } catch (sealErr) {
+        // Don't fail the webhook if Seal lookup fails
+        error("[UpPromote] Error processing Seal subscriptions:", sealErr);
+      }
+    } else {
+      log("[UpPromote] No email found in webhook payload, skipping Seal subscription lookup", {
+        referralId: payload.id,
+        payloadKeys: Object.keys(payload)
+      });
     }
 
     return res.status(200).json({ success: true });
