@@ -35,41 +35,25 @@ async function getSubscriptionsByEmail(email) {
       params: { query: email },
     });
 
+    // ✅ Correct extraction based on real Seal response
+    const subscriptions = Array.isArray(res?.data?.payload?.subscriptions)
+      ? res.data.payload.subscriptions
+      : [];
+
+    // ✅ Accurate, meaningful debug log
     log("[Seal] Successfully fetched subscriptions", {
       email,
       responseStatus: res.status,
-      isArrayResponse: Array.isArray(res.data.payload.subscriptions),
-      subscriptionCount: Array.isArray(res.data.payload.subscriptions)  
-        ? res.data.length
-        : 0,
+      hasPayload: Boolean(res?.data?.payload),
+      isArrayResponse: Array.isArray(subscriptions),
+      subscriptionCount: subscriptions.length,
+      subscriptionIds: subscriptions.map(sub => sub.id),
     });
 
-    // Seal API might return:
-    // - An array of subscription objects directly: [{ id: 1, email: "...", ... }, ...]
-    // - An object with a subscriptions array: { subscriptions: [...], ... }
-    // - A single subscription object: { id: 1, email: "...", ... }
-
-    let subscriptions = [];
-
-    if (Array.isArray(res.data)) {
-      subscriptions = res.data;
-    } else if (res.data && Array.isArray(res.data.subscriptions)) {
-      subscriptions = res.data.subscriptions;
-    } else if (res.data && res.data.id) {
-      // Single subscription object
-      subscriptions = [res.data];
-    } else if (res.data && res.data.data && Array.isArray(res.data.data)) {
-      subscriptions = res.data.data;
+    // 🔍 Helpful warning (not an error)
+    if (!subscriptions.length) {
+      log("[Seal] No subscriptions found for email", { email });
     }
-
-    // Extract subscription IDs for logging
-    const subscriptionIds = subscriptions.map((sub) => sub.id).filter(Boolean);
-
-    log("[Seal] Extracted subscriptions", {
-      email,
-      subscriptionIds,
-      count: subscriptions.length,
-    });
 
     return subscriptions;
   } catch (err) {
@@ -77,12 +61,13 @@ async function getSubscriptionsByEmail(email) {
       email,
       status: err.response?.status,
       statusText: err.response?.statusText,
-      data: err.response?.data,
+      responseData: err.response?.data,
       message: err.message,
     });
     throw err;
   }
 }
+
 
 /**
  * Get subscription IDs by customer email (helper function).
