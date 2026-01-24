@@ -38,6 +38,7 @@ async function getSubscriptionsByEmail(email) {
     log("[Seal] Successfully fetched subscriptions", {
       email,
       responseStatus: res.status,
+      isArrayResponse:Array.isArray(res.data),
       subscriptionCount: Array.isArray(res.data) ? res.data.length : 0
     });
 
