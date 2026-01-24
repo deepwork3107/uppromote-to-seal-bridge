@@ -102,29 +102,50 @@ router.post("/referral-approved", async (req, res) => {
       // Do not fail the webhook for internal logic errors
     }
 
-    // 5) Extract email from webhook payload (try multiple fields)
-    // Priority: customer_email > customer?.email > affiliate?.email > email
+    // 5) Extract affiliate email from webhook payload 
+    // Using affiliate's email to find and apply discounts to their subscriptions
+    // Priority: affiliate?.email > customer_email > customer?.email > email
     const customerEmail = 
+      payload.affiliate?.email ||
       payload.customer_email || 
       payload.customer?.email || 
-      payload.affiliate?.email || 
       payload.email;
+
+    // Log all available email fields for debugging
+    log("[UpPromote] Available email fields in webhook", {
+      affiliate_email: payload.affiliate?.email,
+      customer_email: payload.customer_email,
+      customer_object_email: payload.customer?.email,
+      email: payload.email,
+      referralId: payload.id
+    });
 
     if (customerEmail) {
       try {
         log("[UpPromote] Extracted email from webhook", {
           email: customerEmail,
           referralId: payload.id,
-          source: payload.customer_email ? 'customer_email' : 
-                  payload.customer?.email ? 'customer.email' :
-                  payload.affiliate?.email ? 'affiliate.email' : 'email'
+          source: payload.affiliate?.email ? 'affiliate.email' :
+                  payload.customer_email ? 'customer_email' : 
+                  payload.customer?.email ? 'customer.email' : 'email',
+          commissionAmount: payload.commission
         });
 
-        // Find Seal subscriptions and apply discount codes
-        const result = await getSubscriptionsAndApplyDiscount(customerEmail);
+        // Get commission amount for dynamic discount creation
+        const commissionAmount = parseFloat(payload.commission || 0);
+
+        // Find Seal subscriptions and apply discount codes with dynamic amount
+        const result = await getSubscriptionsAndApplyDiscount(
+          customerEmail, 
+          null, // Let the function handle discount code creation
+          commissionAmount,
+          payload.id
+        );
+        
         log("[UpPromote] Processed Seal subscriptions and applied discounts", {
-          customerEmail,
+          affiliateEmail: customerEmail,
           referralId: payload.id,
+          commissionAmount,
           subscriptionIds: result.subscriptionIds,
           appliedCount: result.appliedDiscounts?.length || 0,
           success: result.success
@@ -132,7 +153,7 @@ router.post("/referral-approved", async (req, res) => {
         
         if (result.errors && result.errors.length > 0) {
           error("[UpPromote] Some subscriptions failed to get discount applied", {
-            customerEmail,
+            affiliateEmail: customerEmail,
             errors: result.errors
           });
         }
@@ -141,10 +162,27 @@ router.post("/referral-approved", async (req, res) => {
         error("[UpPromote] Error processing Seal subscriptions:", sealErr);
       }
     } else {
-      log("[UpPromote] No email found in webhook payload, skipping Seal subscription lookup", {
+      // If no email is available, we cannot apply discounts to subscriptions
+      // This might happen for incomplete webhook data
+      log("[UpPromote] No email found in webhook payload", {
         referralId: payload.id,
+        trackingType: payload.tracking_type,
+        hasAffiliateEmail: !!payload.affiliate?.email,
+        hasCustomerEmail: !!payload.customer_email,
+        hasCustomerObject: !!payload.customer,
+        hasEmailField: !!payload.email,
         payloadKeys: Object.keys(payload)
       });
+      
+      // For manually added referrals, the affiliate email should still be available
+      if (payload.tracking_type === 'Manually added') {
+        log("[UpPromote] Manually added referral detected - will apply discount to affiliate's subscriptions if email available", {
+          referralId: payload.id,
+          orderId: payload.order_id,
+          orderNumber: payload.order_number,
+          hasAffiliateEmail: !!payload.affiliate?.email
+        });
+      }
     }
 
     return res.status(200).json({ success: true });
