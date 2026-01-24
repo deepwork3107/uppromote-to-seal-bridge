@@ -7,18 +7,18 @@ const sealApi = axios.create({
   headers: {
     Accept: "application/json",
     "Content-Type": "application/json",
-    "X-Seal-Token": config.sealApiToken
+    "X-Seal-Token": config.sealApiToken,
   },
-  timeout: 20000
+  timeout: 20000,
 });
 
 /**
  * Get subscriptions by customer email.
  * GET /subscriptions?query={email}
- * 
+ *
  * This function extracts subscription IDs from the Seal API response.
  * The email can come from UpPromote webhook (customer_email field) or UpPromote API.
- * 
+ *
  * @param {string} email - Customer email address
  * @returns {Promise<Array>} Array of subscription objects with IDs
  */
@@ -30,25 +30,27 @@ async function getSubscriptionsByEmail(email) {
 
   try {
     log("[Seal] Fetching subscriptions by email", { email });
-    
+
     const res = await sealApi.get("/subscriptions", {
-      params: { query: email }
+      params: { query: email },
     });
 
     log("[Seal] Successfully fetched subscriptions", {
       email,
       responseStatus: res.status,
-      isArrayResponse:Array.isArray(res.data),
-      subscriptionCount: Array.isArray(res.data) ? res.data.length : 0
+      isArrayResponse: Array.isArray(res.data.payload.subscriptions),
+      subscriptionCount: Array.isArray(res.data.payload.subscriptions)  
+        ? res.data.length
+        : 0,
     });
 
     // Seal API might return:
     // - An array of subscription objects directly: [{ id: 1, email: "...", ... }, ...]
     // - An object with a subscriptions array: { subscriptions: [...], ... }
     // - A single subscription object: { id: 1, email: "...", ... }
-    
+
     let subscriptions = [];
-    
+
     if (Array.isArray(res.data)) {
       subscriptions = res.data;
     } else if (res.data && Array.isArray(res.data.subscriptions)) {
@@ -61,12 +63,12 @@ async function getSubscriptionsByEmail(email) {
     }
 
     // Extract subscription IDs for logging
-    const subscriptionIds = subscriptions.map(sub => sub.id).filter(Boolean);
-    
+    const subscriptionIds = subscriptions.map((sub) => sub.id).filter(Boolean);
+
     log("[Seal] Extracted subscriptions", {
       email,
       subscriptionIds,
-      count: subscriptions.length
+      count: subscriptions.length,
     });
 
     return subscriptions;
@@ -76,7 +78,7 @@ async function getSubscriptionsByEmail(email) {
       status: err.response?.status,
       statusText: err.response?.statusText,
       data: err.response?.data,
-      message: err.message
+      message: err.message,
     });
     throw err;
   }
@@ -85,13 +87,13 @@ async function getSubscriptionsByEmail(email) {
 /**
  * Get subscription IDs by customer email (helper function).
  * This extracts just the IDs from getSubscriptionsByEmail response.
- * 
+ *
  * @param {string} email - Customer email address
  * @returns {Promise<Array<string|number>>} Array of subscription IDs
  */
 async function getSubscriptionIdsByEmail(email) {
   const subscriptions = await getSubscriptionsByEmail(email);
-  const ids = subscriptions.map(sub => sub.id).filter(Boolean);
+  const ids = subscriptions.map((sub) => sub.id).filter(Boolean);
   log("[Seal] Extracted subscription IDs", { email, subscriptionIds: ids });
   return ids;
 }
@@ -102,7 +104,7 @@ async function getSubscriptionIdsByEmail(email) {
  * 1. Gets all subscriptions for the given email
  * 2. Extracts subscription IDs from the response
  * 3. Applies discount code to each subscription via /subscription-discount-code API
- * 
+ *
  * @param {string} email - Customer email address (from UpPromote webhook or API)
  * @param {string} discountCode - Discount code to apply (optional, uses config if not provided)
  * @returns {Promise<Object>} Object with applied subscription IDs and results
@@ -114,25 +116,30 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
   }
 
   const codeToUse = discountCode || config.subscriptionDiscountCode;
-  
+
   if (!codeToUse) {
-    log("[Seal] No discount code configured, skipping discount application", { email });
+    log("[Seal] No discount code configured, skipping discount application", {
+      email,
+    });
     const subscriptions = await getSubscriptionsByEmail(email);
-    const ids = subscriptions.map(sub => sub.id).filter(Boolean);
+    const ids = subscriptions.map((sub) => sub.id).filter(Boolean);
     return {
       email,
       subscriptionIds: ids,
       appliedDiscounts: [],
-      message: "No discount code configured"
+      message: "No discount code configured",
     };
   }
 
   try {
-    log("[Seal] Getting subscriptions and applying discount", { email, discountCode: codeToUse });
-    
+    log("[Seal] Getting subscriptions and applying discount", {
+      email,
+      discountCode: codeToUse,
+    });
+
     // Get subscriptions by email
     const subscriptions = await getSubscriptionsByEmail(email);
-    const subscriptionIds = subscriptions.map(sub => sub.id).filter(Boolean);
+    const subscriptionIds = subscriptions.map((sub) => sub.id).filter(Boolean);
 
     if (subscriptionIds.length === 0) {
       log("[Seal] No subscriptions found for email", { email });
@@ -140,7 +147,7 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
         email,
         subscriptionIds: [],
         appliedDiscounts: [],
-        message: "No subscriptions found"
+        message: "No subscriptions found",
       };
     }
 
@@ -148,7 +155,7 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
       email,
       subscriptionIds,
       discountCode: codeToUse,
-      count: subscriptionIds.length
+      count: subscriptionIds.length,
     });
 
     // Apply discount code to each subscription
@@ -161,23 +168,23 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
         await applyDiscountCode(subscriptionId, codeToUse);
         results.push({
           subscriptionId,
-          success: true
+          success: true,
         });
         log("[Seal] Successfully applied discount to subscription", {
           email,
           subscriptionId,
-          discountCode: codeToUse
+          discountCode: codeToUse,
         });
       } catch (err) {
         errors.push({
           subscriptionId,
-          error: err.message
+          error: err.message,
         });
         error("[Seal] Failed to apply discount to subscription", {
           email,
           subscriptionId,
           discountCode: codeToUse,
-          error: err.message
+          error: err.message,
         });
         // Continue with other subscriptions even if one fails
       }
@@ -187,7 +194,7 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
       email,
       totalSubscriptions: subscriptionIds.length,
       successful: results.length,
-      failed: errors.length
+      failed: errors.length,
     });
 
     return {
@@ -195,7 +202,7 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
       subscriptionIds,
       appliedDiscounts: results,
       errors: errors.length > 0 ? errors : undefined,
-      success: errors.length === 0
+      success: errors.length === 0,
     };
   } catch (err) {
     error("[Seal] Failed to get subscriptions and apply discount", {
@@ -203,7 +210,7 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
       status: err.response?.status,
       statusText: err.response?.statusText,
       data: err.response?.data,
-      message: err.message
+      message: err.message,
     });
     throw err;
   }
@@ -216,14 +223,14 @@ async function getSubscriptionsAndApplyDiscount(email, discountCode = null) {
  * IMPORTANT:
  * - The discount code must exist in Shopify and support subscriptions.
  * - You control the value (fixed or %) when you create the code.
- * 
+ *
  * @param {string|number} subscriptionId - Subscription ID
  * @param {string} discountCode - Discount code to apply
  */
 async function applyDiscountCode(subscriptionId, discountCode) {
   if (!discountCode) {
     log("[Seal] No discount code configured, skipping discount apply", {
-      subscriptionId
+      subscriptionId,
     });
     return;
   }
@@ -231,21 +238,21 @@ async function applyDiscountCode(subscriptionId, discountCode) {
   const payload = {
     subscription_id: subscriptionId,
     action: "apply",
-    discount_code: discountCode
+    discount_code: discountCode,
   };
 
   try {
     log("[Seal] Applying discount code to subscription", {
       subscriptionId,
       discountCode,
-      payload
+      payload,
     });
     const res = await sealApi.put("/subscription-discount-code", payload);
     log("[Seal] Successfully applied discount code", {
       subscriptionId,
       discountCode,
       responseStatus: res.status,
-      responseData: res.data
+      responseData: res.data,
     });
     return res.data;
   } catch (err) {
@@ -255,7 +262,7 @@ async function applyDiscountCode(subscriptionId, discountCode) {
       status: err.response?.status,
       statusText: err.response?.statusText,
       data: err.response?.data,
-      message: err.message
+      message: err.message,
     });
     throw err;
   }
@@ -266,5 +273,5 @@ module.exports = {
   getSubscriptionsByEmail,
   getSubscriptionIdsByEmail,
   getSubscriptionsAndApplyDiscount,
-  applyDiscountCode
+  applyDiscountCode,
 };
