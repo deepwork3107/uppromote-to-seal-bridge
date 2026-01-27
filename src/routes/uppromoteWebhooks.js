@@ -7,6 +7,7 @@ const config = require("../config");
 const { log, error } = require("../utils/logger");
 const { storeReferralCredit } = require("../services/creditService");
 const { getSubscriptionsAndApplyDiscount } = require("../services/sealClient");
+const { addReferralAdjustment } = require("../services/uppromoteClient");
 
 /**
  * Verify X-UpPromote-Signature header using HMAC-SHA256
@@ -62,7 +63,8 @@ router.get("/referral-approved", (req, res) => {
 /**
  * POST handler for UpPromote "referral.approved" webhooks.
  * - Empty POST (no body, no signature) → treat as validation → 200 OK
- * - Real webhook (body + signature) → verify, parse JSON, store credit
+ * - Real webhook (body + signature) → verify, parse JSON, store credit,
+ *   apply Seal discounts, then sync usage back to UpPromote via adjustment.
  */
 router.post("/referral-approved", async (req, res) => {
   try {
@@ -94,7 +96,7 @@ router.post("/referral-approved", async (req, res) => {
 
     log("[UpPromote] referral-approved webhook payload:", payload);
 
-    // 4) Your business logic: store credit for this referral
+    // 4) Store credit for this referral (local ledger)
     try {
       storeReferralCredit(payload);
     } catch (logicErr) {
@@ -102,13 +104,12 @@ router.post("/referral-approved", async (req, res) => {
       // Do not fail the webhook for internal logic errors
     }
 
-    // 5) Extract affiliate email from webhook payload 
-    // Using affiliate's email to find and apply discounts to their subscriptions
+    // 5) Extract email we will use to match Seal subscriptions.
     // Priority: affiliate?.email > customer_email > customer?.email > email
-    const customerEmail = 
+    const customerEmail =
       payload.affiliate?.email ||
-      payload.customer_email || 
-      payload.customer?.email || 
+      payload.customer_email ||
+      payload.customer?.email ||
       payload.email;
 
     // Log all available email fields for debugging
@@ -125,40 +126,82 @@ router.post("/referral-approved", async (req, res) => {
         log("[UpPromote] Extracted email from webhook", {
           email: customerEmail,
           referralId: payload.id,
-          source: payload.affiliate?.email ? 'affiliate.email' :
-                  payload.customer_email ? 'customer_email' : 
-                  payload.customer?.email ? 'customer.email' : 'email',
+          source: payload.affiliate?.email
+            ? "affiliate.email"
+            : payload.customer_email
+            ? "customer_email"
+            : payload.customer?.email
+            ? "customer.email"
+            : "email",
           commissionAmount: payload.commission
         });
 
-        // Get commission amount for dynamic discount creation
+        // Commission amount for dynamic discount creation
         const commissionAmount = parseFloat(payload.commission || 0);
 
-        // Find Seal subscriptions and apply discount codes with dynamic amount
+        // 6) Find Seal subscriptions and apply discount code(s)
         const result = await getSubscriptionsAndApplyDiscount(
-          customerEmail, 
-          null, // Let the function handle discount code creation
+          customerEmail,
+          null, // Let the Seal service handle discount code creation
           commissionAmount,
           payload.id
         );
-        
+
+        const appliedCount =
+          typeof result.appliedCount === "number"
+            ? result.appliedCount
+            : result.appliedDiscounts?.length || 0;
+
         log("[UpPromote] Processed Seal subscriptions and applied discounts", {
           affiliateEmail: customerEmail,
           referralId: payload.id,
           commissionAmount,
           subscriptionIds: result.subscriptionIds,
-          appliedCount: result.appliedDiscounts?.length || 0,
+          appliedCount,
           success: result.success
         });
-        
+
         if (result.errors && result.errors.length > 0) {
           error("[UpPromote] Some subscriptions failed to get discount applied", {
             affiliateEmail: customerEmail,
             errors: result.errors
           });
         }
+
+        // 7) If at least one subscription got a discount, tell UpPromote
+        //    that we "used" this commission, by adding a negative adjustment.
+        if (result.success && appliedCount > 0 && commissionAmount > 0) {
+          const referralId = payload.id;
+          // For now we assume we used the full commission once.
+          // If you later support partial usage, adjust this logic.
+          const usedAmount = commissionAmount;
+          const adjustmentAmount = -usedAmount;
+
+          try {
+            await addReferralAdjustment(referralId, adjustmentAmount);
+
+            log(
+              "[UpPromote] Recorded commission usage via referral adjustment",
+              {
+                referralId,
+                originalCommission: commissionAmount,
+                usedAmount,
+                adjustmentAmount
+              }
+            );
+          } catch (adjErr) {
+            error(
+              "[UpPromote] Could not sync commission deduction back to UpPromote",
+              {
+                referralId,
+                adjustmentAmount,
+                error: adjErr.message
+              }
+            );
+          }
+        }
       } catch (sealErr) {
-        // Don't fail the webhook if Seal lookup fails
+        // Don't fail the webhook if Seal lookup or discount application fails
         error("[UpPromote] Error processing Seal subscriptions:", sealErr);
       }
     } else {
@@ -173,15 +216,18 @@ router.post("/referral-approved", async (req, res) => {
         hasEmailField: !!payload.email,
         payloadKeys: Object.keys(payload)
       });
-      
+
       // For manually added referrals, the affiliate email should still be available
-      if (payload.tracking_type === 'Manually added') {
-        log("[UpPromote] Manually added referral detected - will apply discount to affiliate's subscriptions if email available", {
-          referralId: payload.id,
-          orderId: payload.order_id,
-          orderNumber: payload.order_number,
-          hasAffiliateEmail: !!payload.affiliate?.email
-        });
+      if (payload.tracking_type === "Manually added") {
+        log(
+          "[UpPromote] Manually added referral detected - will apply discount to affiliate's subscriptions if email available",
+          {
+            referralId: payload.id,
+            orderId: payload.order_id,
+            orderNumber: payload.order_number,
+            hasAffiliateEmail: !!payload.affiliate?.email
+          }
+        );
       }
     }
 
