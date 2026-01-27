@@ -7,7 +7,7 @@ const config = require("../config");
 const { log, error } = require("../utils/logger");
 const { storeReferralCredit } = require("../services/creditService");
 const { getSubscriptionsAndApplyDiscount } = require("../services/sealClient");
-const { addReferralAdjustment } = require("../services/uppromoteClient");
+const { addReferralAdjustment } = require("../services/upPromoteClient");
 
 /**
  * Verify X-UpPromote-Signature header using HMAC-SHA256
