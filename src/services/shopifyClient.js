@@ -3,12 +3,18 @@ const axios = require("axios");
 const config = require("../config");
 const { log, error } = require("../utils/logger");
 
-let shopifyApi = null;
+// -----------------------------------------------------------------------------
+// Shopify GraphQL client setup
+// -----------------------------------------------------------------------------
 
-// Initialize Shopify API client if credentials are available
-if (config.shopifyStore && config.shopifyAdminApiToken) {
-  shopifyApi = axios.create({
-    baseURL: `https://${config.shopifyStore}/admin/api/${config.shopifyApiVersion}`,
+const isShopifyConfigured =
+  !!config.shopifyStore && !!config.shopifyAdminApiToken;
+
+let shopifyGraphql = null;
+
+if (isShopifyConfigured) {
+  shopifyGraphql = axios.create({
+    baseURL: `https://${config.shopifyStore}/admin/api/${config.shopifyApiVersion}/graphql.json`,
     headers: {
       "X-Shopify-Access-Token": config.shopifyAdminApiToken,
       "Content-Type": "application/json",
@@ -16,176 +22,245 @@ if (config.shopifyStore && config.shopifyAdminApiToken) {
     timeout: 15000,
   });
 
-  log("[Shopify] API client configured", {
+  log("[Shopify] GraphQL client configured", {
     store: config.shopifyStore,
     apiVersion: config.shopifyApiVersion,
   });
 } else {
-  log("[Shopify] API client NOT configured (missing store or admin token)");
+  log(
+    "[Shopify] GraphQL client NOT configured – dynamic discounts are disabled",
+    {
+      shopifyStore: config.shopifyStore || "missing",
+      shopifyAdminApiToken: config.shopifyAdminApiToken ? "set" : "missing",
+    },
+  );
 }
 
+// -----------------------------------------------------------------------------
+// Core: create a per-referral discount code using GraphQL
+// -----------------------------------------------------------------------------
+
 /**
- * Create a dynamic discount code in Shopify with a specific fixed amount.
- * This creates a price rule + one-time discount code that matches the commission amount.
+ * Create a dynamic order-level fixed-amount discount code in Shopify
+ * using the Admin GraphQL API (discountCodeBasicCreate).
  *
- * @param {number} discountAmount - The fixed discount amount (e.g., 18.00)
- * @param {string|number} referralId - The referral ID from UpPromote for unique code generation
- * @param {string} customerEmail - Email (used only for logging / title)
- * @returns {Promise<string>} The created discount code (e.g. "AFFILIATE-26005704")
+ * This returns a normal discount code the store can use anywhere
+ * (including Seal subscriptions), like: AFFILIATE-26008232.
+ *
+ * @param {number} commissionAmount - the commission amount (e.g. 30 => $30 off)
+ * @param {string|number} referralId - UpPromote referral id for uniqueness
+ * @param {string} customerEmail - for logging only (discount is not restricted)
+ * @returns {Promise<string>} discountCode
  */
-async function createDynamicDiscountCode(discountAmount, referralId, customerEmail) {
-  if (!shopifyApi) {
+async function createDynamicDiscountCode(
+  commissionAmount,
+  referralId,
+  customerEmail,
+) {
+  if (!shopifyGraphql) {
+    throw new Error("Shopify GraphQL not configured");
+  }
+
+  const amountNumber = Number(commissionAmount);
+  if (!amountNumber || amountNumber <= 0) {
     throw new Error(
-      "Shopify API not configured - missing SHOPIFY_STORE_DOMAIN or SHOPIFY_ADMIN_API_TOKEN"
+      `Invalid commission amount for discount: ${commissionAmount}`,
     );
   }
 
-  const amount = Number(discountAmount);
-  if (!amount || amount <= 0) {
-    throw new Error("Invalid discount amount");
-  }
-
   const discountCode = `AFFILIATE-${referralId}`;
+  const now = new Date();
+  const oneYearFromNow = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000); // 1 year validity
 
-  const discountData = {
-    price_rule: {
-      title: `Affiliate Credit - Referral ${referralId} (${customerEmail || "unknown"})`,
-      target_type: "line_item",
-      target_selection: "all",
-      allocation_method: "across",
-      value_type: "fixed_amount",
-      // Shopify expects a NEGATIVE number for a discount value
-      value: `-${amount}`,
-      customer_selection: "all",
-      usage_limit: 1, // One-time use
-      starts_at: new Date().toISOString(),
-      // Valid for 1 year
-      // ends_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-      // entitled_product_ids: [],
-      // entitled_variant_ids: [],
-      // entitled_collection_ids: [],
-      // entitled_country_ids: [],
+  // GraphQL mutation from Shopify docs (discountCodeBasicCreate)
+  const mutation = `
+    mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+      discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+        codeDiscountNode {
+          id
+          codeDiscount {
+            __typename
+          }
+        }
+        userErrors {
+          field
+          code
+          message
+        }
+      }
+    }
+  `;
+
+  // Build the DiscountCodeBasicInput
+  const variables = {
+    basicCodeDiscount: {
+      title: `Affiliate Credit - Referral ${referralId}`,
+      code: discountCode,
+
+      // Time window
+      startsAt: now.toISOString(),
+      // endsAt: oneYearFromNow.toISOString(),
+
+      // One use per customer / in total (you can adjust if you want)
+      usageLimit: 1,
+      appliesOncePerCustomer: true,
+
+      // All customers + all items, order-level discount
+      customerSelection: {
+        all: true,
+      },
+      customerGets: {
+        items: {
+          all: true,
+        },
+        appliesOnSubscription: true,
+        appliesOnOneTimePurchase: true,
+        value: {
+          discountAmount: {
+            amount: amountNumber.toFixed(2), // as string
+            appliesOnEachItem: false,
+          },
+        },
+      },
+
+      // Allow combining if you want; safe defaults
+      combinesWith: {
+        orderDiscounts: true,
+        productDiscounts: true,
+        shippingDiscounts: true,
+      },
     },
   };
 
   try {
-    log("[Shopify] Creating dynamic discount price rule", {
-      discountAmount: amount,
+    log("[Shopify] Creating GraphQL basic discount code", {
+      discountCode,
+      amount: amountNumber.toFixed(2),
       referralId,
       customerEmail,
-      discountCode,
     });
 
-    // 1. Create the price rule
-    const priceRuleResponse = await shopifyApi.post("/price_rules.json", discountData);
-    const priceRuleId = priceRuleResponse.data.price_rule.id;
-
-    log("[Shopify] Price rule created successfully", {
-      priceRuleId,
-      discountAmount: amount,
-      referralId,
+    const response = await shopifyGraphql.post("", {
+      query: mutation,
+      variables,
     });
 
-    // 2. Create the discount code for this price rule
-    const discountCodeData = {
-      discount_code: {
-        code: discountCode,
-      },
-    };
+    const payload =
+      response.data &&
+      response.data.data &&
+      response.data.data.discountCodeBasicCreate;
 
-    const discountCodeResponse = await shopifyApi.post(
-      `/price_rules/${priceRuleId}/discount_codes.json`,
-      discountCodeData
-    );
+    const userErrors = payload?.userErrors || [];
+    if (userErrors.length) {
+      error("[Shopify] discountCodeBasicCreate userErrors", {
+        discountCode,
+        referralId,
+        userErrors,
+      });
 
-    log("[Shopify] Discount code created successfully", {
+      const msg = userErrors.map((e) => e.message).join("; ");
+      throw new Error("Shopify discountCodeBasicCreate failed: " + msg);
+    }
+
+    const nodeId = payload?.codeDiscountNode?.id;
+    log("[Shopify] GraphQL discount code created", {
       discountCode,
-      priceRuleId,
-      discountAmount: amount,
+      nodeId,
       referralId,
-      customerEmail,
-      apiResponse: discountCodeResponse.data,
+      amount: amountNumber.toFixed(2),
     });
 
     return discountCode;
   } catch (err) {
-    error("[Shopify] Failed to create dynamic discount code", {
-      discountAmount: amount,
+    error("[Shopify] Failed to create GraphQL dynamic discount", {
+      discountCode,
       referralId,
-      customerEmail,
-      status: err.response?.status,
-      statusText: err.response?.statusText,
-      responseData: err.response?.data,
+      commissionAmount: amountNumber,
       message: err.message,
+      stack: err.stack,
+      responseData: err.response?.data,
     });
     throw err;
   }
 }
 
+// -----------------------------------------------------------------------------
+// Optional helper: check if a code exists (used rarely, but kept for API parity)
+// -----------------------------------------------------------------------------
+
 /**
- * Check if a discount code exists in Shopify.
- * Uses /discount_codes/lookup.json (optional helper).
+ * Check if a discount code already exists using codeDiscountNodes search.
+ * Not strictly required for the bridge, but can be useful.
  *
  * @param {string} discountCode
  * @returns {Promise<boolean>}
  */
 async function discountCodeExists(discountCode) {
-  if (!shopifyApi) {
-    log("[Shopify] API not configured, assuming discount code doesn't exist");
+  if (!shopifyGraphql) {
+    log("[Shopify] GraphQL not configured, discountCodeExists -> false", {
+      discountCode,
+    });
     return false;
   }
 
-  if (!discountCode) return false;
+  const query = `
+    query codeDiscountNodeSearch($query: String!) {
+      codeDiscountNodes(first: 1, query: $query) {
+        edges {
+          node {
+            id
+          }
+        }
+      }
+    }
+  `;
 
   try {
-    const response = await shopifyApi.get("/discount_codes/lookup.json", {
-      params: { code: discountCode },
+    const resp = await shopifyGraphql.post("", {
+      query,
+      variables: { query: `code:${discountCode}` },
     });
 
-    const exists = !!response.data?.discount_code;
-    log("[Shopify] Discount code existence check", { discountCode, exists });
+    const edges = resp.data?.data?.codeDiscountNodes?.edges || [];
+
+    const exists = edges.length > 0;
+    log("[Shopify] discountCodeExists", { discountCode, exists });
     return exists;
   } catch (err) {
-    if (err.response?.status === 404) {
-      log("[Shopify] Discount code not found", { discountCode });
-      return false;
-    }
-
-    log("[Shopify] Error checking discount code existence", {
+    error("[Shopify] discountCodeExists error", {
       discountCode,
-      status: err.response?.status,
       message: err.message,
+      responseData: err.response?.data,
     });
     return false;
   }
 }
 
+// -----------------------------------------------------------------------------
+// Public API used by the rest of your app
+// -----------------------------------------------------------------------------
+
 /**
- * Always create a new dynamic discount code for this commission.
- * No static fallback.
+ * Public function used by UpPromote → Seal flow.
+ * With Option 2 we *always* create a dynamic code – no static fallback.
  *
  * @param {number} commissionAmount
  * @param {string|number} referralId
  * @param {string} customerEmail
- * @returns {Promise<string>} discountCode
+ * @returns {Promise<string>}
  */
-async function getOrCreateDiscountCode(commissionAmount, referralId, customerEmail) {
-  const amount = Number(commissionAmount);
-
-  if (!shopifyApi) {
-    throw new Error("Shopify API not configured");
-  }
-  if (!amount || amount <= 0) {
-    throw new Error("Invalid commission amount for discount creation");
-  }
-
-  // Right now we always create a fresh dynamic code per referral
-  return await createDynamicDiscountCode(amount, referralId, customerEmail);
+async function getOrCreateDiscountCode(
+  commissionAmount,
+  referralId,
+  customerEmail,
+) {
+  // Always create a fresh code per referral
+  return createDynamicDiscountCode(commissionAmount, referralId, customerEmail);
 }
 
 module.exports = {
   createDynamicDiscountCode,
   discountCodeExists,
   getOrCreateDiscountCode,
-  isShopifyConfigured: !!shopifyApi,
+  isShopifyConfigured,
 };
