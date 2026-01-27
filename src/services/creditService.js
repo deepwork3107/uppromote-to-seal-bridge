@@ -1,193 +1,201 @@
+// src/services/creditService.js
 const { log, error } = require("../utils/logger");
 const { addReferralAdjustment } = require("./upPromoteClient");
 
-/**
- * In-memory storage (replace with real DB in production)
- */
-const referralCredits = new Map(); // referralId -> { referralId, affiliateId, affiliateEmail, customerEmail, remainingCommission }
-const customerToReferrals = new Map(); // customerEmail -> Set(referralIds)
+// In–memory storage
+// referralId -> record
+const referralCredits = new Map();
+// customerEmail (or fallback email) -> Set(referralIds)
+const customerToReferrals = new Map();
 
 /**
- * Store credit when a referral is approved.
- * payload = UpPromote "referral approved" webhook body. :contentReference[oaicite:8]{index=8}
+ * Try to extract an email from the UpPromote referral payload.
+ * Priority:
+ * 1) customer_email
+ * 2) payload.customer.email (if they ever add it)
+ * 3) payload.email
+ * 4) affiliate.email (fallback – what you asked for)
  */
-function storeReferralCredit(payload) {
-  log("[CreditService] Storing referral credit", { payload });
-  
-  const referralId = payload.id;
-  const affiliateId = payload.affiliate?.id;
-  const affiliateEmail = payload.affiliate?.email;
-  const customerEmail = payload.customer_email;
-  const commission = parseFloat(payload.commission || "0");
+function extractEmailFromReferral(payload) {
+  const affiliateEmail = payload.affiliate?.email || null;
+  const customerEmail = payload.customer_email || null;
+  const customerObjectEmail = payload.customer?.email || null;
+  const genericEmail = payload.email || null;
 
-  if (!referralId || !customerEmail || isNaN(commission)) {
-    error("[CreditService] Missing data in referral payload, skipping credit store", {
-      referralId: referralId || "missing",
-      customerEmail: customerEmail || "missing",
-      commission: isNaN(commission) ? "invalid" : commission
-    });
-    return;
-  }
-
-  const record = {
-    referralId,
-    affiliateId,
-    affiliateEmail,
-    customerEmail,
-    remainingCommission: commission
-  };
-
-  const existingRecord = referralCredits.get(referralId);
-  if (existingRecord) {
-    log("[CreditService] Updating existing referral credit", {
-      referralId,
-      oldCommission: existingRecord.remainingCommission,
-      newCommission: commission
-    });
-  }
-
-  referralCredits.set(referralId, record);
-
-  if (!customerToReferrals.has(customerEmail)) {
-    customerToReferrals.set(customerEmail, new Set());
-    log("[CreditService] Created new customer entry", { customerEmail });
-  }
-  customerToReferrals.get(customerEmail).add(referralId);
-
-  log("[CreditService] Successfully stored referral credit", {
-    ...record,
-    totalReferralsForCustomer: customerToReferrals.get(customerEmail).size
+  log("[UpPromote] Available email fields in webhook", {
+    affiliate_email: affiliateEmail,
+    customer_email: customerEmail,
+    customer_object_email: customerObjectEmail,
+    email: genericEmail,
+    referralId: payload.id,
   });
+
+  let email = customerEmail || customerObjectEmail || genericEmail;
+
+  let source = "none";
+
+  if (email) {
+    if (email === customerEmail) source = "customer_email";
+    else if (email === customerObjectEmail) source = "customer.email";
+    else if (email === genericEmail) source = "email";
+  } else if (affiliateEmail) {
+    // 👉 Fallback when no customer email is provided
+    email = affiliateEmail;
+    source = "affiliate.email";
+  }
+
+  if (email) {
+    log("[UpPromote] Extracted email from webhook", {
+      email,
+      referralId: payload.id,
+      source,
+      commissionAmount: payload.commission,
+    });
+  } else {
+    log("[UpPromote] Could not extract any email from webhook", {
+      referralId: payload.id,
+    });
+  }
+
+  return email;
 }
 
 /**
- * Get total credit for a given customer email.
+ * Store credit when a referral is approved.
+ * Called from the UpPromote webhook handler.
+ */
+function storeReferralCredit(payload) {
+  try {
+    log("[CreditService] Storing referral credit", { payload });
+
+    const referralId = payload.id;
+    const commissionRaw = payload.commission || payload.commission_amount || "0";
+    const commission = parseFloat(commissionRaw);
+
+    const email = extractEmailFromReferral(payload);
+
+    if (!referralId || isNaN(commission)) {
+      error("[CreditService] Missing referralId or commission, skipping credit store", {
+        referralId,
+        commission: commissionRaw,
+      });
+      return;
+    }
+
+    if (!email) {
+      // Even with fallback we found no email – truly unusable
+      error(
+        "[CreditService] No usable email in referral payload, skipping credit store",
+        {
+          referralId,
+          commission,
+        }
+      );
+      return;
+    }
+
+    const customerEmail = email;
+    const record = {
+      referralId,
+      affiliateId: payload.affiliate?.id || null,
+      affiliateEmail: payload.affiliate?.email || null,
+      customerEmail,
+      remainingCommission: commission,
+      createdAt: payload.created_at || new Date().toISOString(),
+    };
+
+    if (!customerToReferrals.has(customerEmail)) {
+      customerToReferrals.set(customerEmail, new Set());
+      log("[CreditService] Created new customer entry", { customerEmail });
+    }
+
+    customerToReferrals.get(customerEmail).add(referralId);
+    referralCredits.set(referralId, record);
+
+    log("[CreditService] Successfully stored referral credit", {
+      ...record,
+      totalReferralsForCustomer: customerToReferrals.get(customerEmail).size,
+    });
+  } catch (err) {
+    error("[CreditService] Error in storeReferralCredit:", err);
+  }
+}
+
+/**
+ * Compute total available credit for a customer (or affiliate fallback email).
  */
 function getTotalCreditForCustomer(customerEmail) {
-  log("[CreditService] Getting total credit for customer", { customerEmail });
-  
   const ids = customerToReferrals.get(customerEmail);
   if (!ids || ids.size === 0) {
-    log("[CreditService] No referrals found for customer", { customerEmail });
+    log("[CreditService] No referrals for customer", { customerEmail });
     return 0;
   }
 
   let total = 0;
-  const referralDetails = [];
   for (const id of ids) {
     const rec = referralCredits.get(id);
-    if (rec) {
+    if (rec && rec.remainingCommission > 0) {
       total += rec.remainingCommission;
-      referralDetails.push({
-        referralId: id,
-        remainingCommission: rec.remainingCommission
-      });
     }
   }
-  
-  log("[CreditService] Total credit calculated", {
-    customerEmail,
-    totalCredit: total,
-    referralCount: ids.size,
-    referralDetails
-  });
-  
+
+  log("[CreditService] Total credit for customer", { customerEmail, total });
   return total;
 }
 
 /**
- * Consume credit up to "amount" for the given customer email.
- * Returns the amount actually used and details per referral.
+ * Consume credit up to amountToUse for a customer (or affiliate email),
+ * and send negative adjustments back to UpPromote.
  *
- * This function ALSO calls UpPromote API to add negative referral adjustments,
- * so affiliate's balance decreases by the used credit. :contentReference[oaicite:9]{index=9}
+ * @returns {Promise<{used:number, breakdown:Array<{referralId:number, used:number}>}>}
  */
 async function consumeCreditForCustomer(customerEmail, amountToUse) {
-  log("[CreditService] Starting credit consumption", {
-    customerEmail,
-    amountToUse
-  });
-
   const ids = customerToReferrals.get(customerEmail);
   if (!ids || ids.size === 0) {
-    log("[CreditService] No referrals found for customer, cannot consume credit", {
-      customerEmail
-    });
+    log("[CreditService] No referrals found for customer", { customerEmail });
     return { used: 0, breakdown: [] };
   }
 
   let remainingToUse = amountToUse;
   const breakdown = [];
 
-  log("[CreditService] Processing referrals for credit consumption", {
-    customerEmail,
-    referralIds: Array.from(ids),
-    amountToUse
-  });
-
   for (const id of ids) {
-    if (remainingToUse <= 0) {
-      log("[CreditService] Credit consumption complete, remaining amount is 0");
-      break;
-    }
+    if (remainingToUse <= 0) break;
 
     const rec = referralCredits.get(id);
-    if (!rec || rec.remainingCommission <= 0) {
-      log("[CreditService] Skipping referral (no remaining commission)", {
-        referralId: id,
-        remainingCommission: rec?.remainingCommission || 0
-      });
-      continue;
-    }
+    if (!rec || rec.remainingCommission <= 0) continue;
 
     const use = Math.min(rec.remainingCommission, remainingToUse);
-    const beforeCommission = rec.remainingCommission;
 
-    log("[CreditService] Consuming credit from referral", {
-      referralId: id,
-      use,
-      beforeCommission,
-      afterCommission: beforeCommission - use
-    });
-
-    // Update local record
+    // Update in-memory record
     rec.remainingCommission -= use;
     referralCredits.set(id, rec);
 
-    // Call UpPromote to reduce commission (negative adjustment)
+    // Negative adjustment to UpPromote
     try {
       await addReferralAdjustment(id, -use);
-      log("[CreditService] Successfully added UpPromote adjustment", {
+      log("[CreditService] Sent negative adjustment to UpPromote", {
         referralId: id,
-        adjustment: -use
+        used: use,
       });
     } catch (err) {
-      error("[CreditService] Failed to add UpPromote adjustment, rolling back local change", {
+      error("[CreditService] Failed to send adjustment to UpPromote", {
         referralId: id,
-        adjustment: -use,
-        error: err.message
+        used: use,
+        error: err.message,
       });
-      // Rollback local change
-      rec.remainingCommission += use;
-      referralCredits.set(id, rec);
-      throw err;
     }
 
-    breakdown.push({
-      referralId: id,
-      used: use
-    });
-
+    breakdown.push({ referralId: id, used: use });
     remainingToUse -= use;
   }
 
   const used = amountToUse - remainingToUse;
-  log("[CreditService] Credit consumption completed", {
+  log("[CreditService] Consumed credit for customer", {
     customerEmail,
     requested: amountToUse,
     used,
-    remaining: remainingToUse,
-    breakdown
+    breakdown,
   });
 
   return { used, breakdown };
@@ -196,5 +204,5 @@ async function consumeCreditForCustomer(customerEmail, amountToUse) {
 module.exports = {
   storeReferralCredit,
   getTotalCreditForCustomer,
-  consumeCreditForCustomer
+  consumeCreditForCustomer,
 };
