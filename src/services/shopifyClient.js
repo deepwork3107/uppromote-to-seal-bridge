@@ -1,3 +1,4 @@
+// src/services/shopifyClient.js
 const axios = require("axios");
 const config = require("../config");
 const { log, error } = require("../utils/logger");
@@ -9,33 +10,43 @@ if (config.shopifyStore && config.shopifyAdminApiToken) {
   shopifyApi = axios.create({
     baseURL: `https://${config.shopifyStore}/admin/api/${config.shopifyApiVersion}`,
     headers: {
-      'X-Shopify-Access-Token': config.shopifyAdminApiToken,
-      'Content-Type': 'application/json',
+      "X-Shopify-Access-Token": config.shopifyAdminApiToken,
+      "Content-Type": "application/json",
     },
     timeout: 15000,
   });
+
+  log("[Shopify] API client configured", {
+    store: config.shopifyStore,
+    apiVersion: config.shopifyApiVersion,
+  });
+} else {
+  log("[Shopify] API client NOT configured (missing store or admin token)");
 }
 
 /**
  * Create a dynamic discount code in Shopify with a specific fixed amount.
- * This creates a one-time use discount code that matches the commission amount.
- * 
+ * This creates a price rule + one-time discount code that matches the commission amount.
+ *
  * @param {number} discountAmount - The fixed discount amount (e.g., 18.00)
  * @param {string} referralId - The referral ID from UpPromote for unique code generation
- * @param {string} customerEmail - Customer email for tracking
+ * @param {string} customerEmail - Customer email for tracking/logging
  * @returns {Promise<string>} The created discount code
  */
 async function createDynamicDiscountCode(discountAmount, referralId, customerEmail) {
   if (!shopifyApi) {
-    throw new Error("Shopify API not configured - missing SHOPIFY_STORE or SHOPIFY_ADMIN_API_TOKEN");
+    throw new Error(
+      "Shopify API not configured - missing SHOPIFY_STORE or SHOPIFY_ADMIN_API_TOKEN"
+    );
   }
 
-  if (!discountAmount || discountAmount <= 0) {
+  const amount = Number(discountAmount);
+  if (!amount || amount <= 0) {
     throw new Error("Invalid discount amount");
   }
 
   const discountCode = `AFFILIATE-${referralId}`;
-  
+
   const discountData = {
     price_rule: {
       title: `Affiliate Credit - Referral ${referralId}`,
@@ -43,42 +54,43 @@ async function createDynamicDiscountCode(discountAmount, referralId, customerEma
       target_selection: "all",
       allocation_method: "across",
       value_type: "fixed_amount",
-      value: `-${discountAmount}`, // Negative value for discount
+      // Shopify expects negative number for discount value
+      value: `-${amount}`,
       customer_selection: "all",
       usage_limit: 1, // One-time use
       starts_at: new Date().toISOString(),
-      ends_at: new Date(Date.now() + (365 * 24 * 60 * 60 * 1000)).toISOString(), // Valid for 1 year
+      // Valid for 1 year
+      ends_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
       entitled_product_ids: [],
       entitled_variant_ids: [],
       entitled_collection_ids: [],
       entitled_country_ids: [],
-    }
+    },
   };
 
   try {
     log("[Shopify] Creating dynamic discount price rule", {
-      discountAmount,
+      discountAmount: amount,
       referralId,
       customerEmail,
-      discountCode
+      discountCode,
     });
 
     // 1. Create the price rule
-    const priceRuleResponse = await shopifyApi.post('/price_rules.json', discountData);
+    const priceRuleResponse = await shopifyApi.post("/price_rules.json", discountData);
     const priceRuleId = priceRuleResponse.data.price_rule.id;
 
     log("[Shopify] Price rule created successfully", {
       priceRuleId,
-      discountAmount,
-      referralId
+      discountAmount: amount,
+      referralId,
     });
 
     // 2. Create the discount code for this price rule
     const discountCodeData = {
       discount_code: {
         code: discountCode,
-        usage_count: 0
-      }
+      },
     };
 
     const discountCodeResponse = await shopifyApi.post(
@@ -89,16 +101,16 @@ async function createDynamicDiscountCode(discountAmount, referralId, customerEma
     log("[Shopify] Discount code created successfully", {
       discountCode,
       priceRuleId,
-      discountAmount,
+      discountAmount: amount,
       referralId,
-      customerEmail
+      customerEmail,
+      apiResponse: discountCodeResponse.data,
     });
 
     return discountCode;
-
   } catch (err) {
     error("[Shopify] Failed to create dynamic discount code", {
-      discountAmount,
+      discountAmount: amount,
       referralId,
       customerEmail,
       status: err.response?.status,
@@ -112,7 +124,8 @@ async function createDynamicDiscountCode(discountAmount, referralId, customerEma
 
 /**
  * Check if a discount code exists in Shopify.
- * 
+ * Uses the /discount_codes/lookup.json endpoint.
+ *
  * @param {string} discountCode - The discount code to check
  * @returns {Promise<boolean>} True if the code exists
  */
@@ -122,19 +135,30 @@ async function discountCodeExists(discountCode) {
     return false;
   }
 
+  if (!discountCode) {
+    return false;
+  }
+
   try {
-    // Search for discount codes
-    const response = await shopifyApi.get('/discount_codes.json', {
-      params: { code: discountCode }
+    const response = await shopifyApi.get("/discount_codes/lookup.json", {
+      params: { code: discountCode },
     });
-    
-    const exists = response.data.discount_codes && response.data.discount_codes.length > 0;
+
+    const exists = !!response.data?.discount_code;
     log("[Shopify] Discount code existence check", { discountCode, exists });
+
     return exists;
   } catch (err) {
+    // Shopify returns 404 if not found; treat that as "does not exist"
+    if (err.response?.status === 404) {
+      log("[Shopify] Discount code not found", { discountCode });
+      return false;
+    }
+
     log("[Shopify] Error checking discount code existence", {
       discountCode,
-      error: err.message
+      status: err.response?.status,
+      message: err.message,
     });
     return false;
   }
@@ -144,22 +168,24 @@ async function discountCodeExists(discountCode) {
  * Get or create a discount code for the given commission amount.
  * If Shopify API is configured, creates a dynamic discount.
  * Otherwise, falls back to the static discount code from config.
- * 
+ *
  * @param {number} commissionAmount - The commission amount to create discount for
  * @param {string} referralId - The referral ID for unique code generation
  * @param {string} customerEmail - Customer email for tracking
  * @returns {Promise<string>} The discount code to use
  */
 async function getOrCreateDiscountCode(commissionAmount, referralId, customerEmail) {
+  const amount = Number(commissionAmount);
+
   // If Shopify API is configured, create dynamic discount
-  if (shopifyApi && commissionAmount > 0) {
+  if (shopifyApi && amount > 0) {
     try {
-      return await createDynamicDiscountCode(commissionAmount, referralId, customerEmail);
+      return await createDynamicDiscountCode(amount, referralId, customerEmail);
     } catch (err) {
       error("[Shopify] Failed to create dynamic discount, falling back to static code", {
-        commissionAmount,
+        commissionAmount: amount,
         referralId,
-        error: err.message
+        error: err.message,
       });
       // Fall through to static code fallback
     }
@@ -168,13 +194,15 @@ async function getOrCreateDiscountCode(commissionAmount, referralId, customerEma
   // Fallback to static discount code from configuration
   const staticCode = config.subscriptionDiscountCode;
   if (!staticCode) {
-    throw new Error("No discount code available - neither dynamic creation nor static code configured");
+    throw new Error(
+      "No discount code available - neither dynamic creation nor static code configured"
+    );
   }
 
   log("[Shopify] Using static discount code fallback", {
     discountCode: staticCode,
-    commissionAmount,
-    referralId
+    commissionAmount: amount,
+    referralId,
   });
 
   return staticCode;
@@ -184,5 +212,5 @@ module.exports = {
   createDynamicDiscountCode,
   discountCodeExists,
   getOrCreateDiscountCode,
-  isShopifyConfigured: !!shopifyApi
+  isShopifyConfigured: !!shopifyApi,
 };

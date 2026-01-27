@@ -9,7 +9,7 @@ const config = {
   uppromoteWebhookSecret: process.env.UPPROMOTE_WEBHOOK_SECRET,
   // Shopify Admin API settings for dynamic discount creation
   shopifyStore: process.env.SHOPIFY_STORE, // e.g., 'your-store.myshopify.com'
-  shopifyAdminApiToken: process.env.SHOPIFY_ADMIN_API_TOKEN,
+  shopifyAdminApiToken: process.env.SHOPIFY_ADMIN_ACCESS_TOKEN,
   shopifyApiVersion: process.env.SHOPIFY_API_VERSION || '2024-01'
 };
 
