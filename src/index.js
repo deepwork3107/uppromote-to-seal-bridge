@@ -93,7 +93,7 @@ server = app.listen(config.port, () => {
     uppromoteApiKey: config.uppromoteApiKey ? "✓ Set" : "✗ Missing",
     sealApiToken: config.sealApiToken ? "✓ Set" : "✗ Missing",
     webhookSharedSecret: config.webhookSharedSecret ? "✓ Set" : "✗ Missing",
-    subscriptionDiscountCode: config.subscriptionDiscountCode || "Not configured",
+    // subscriptionDiscountCode: config.subscriptionDiscountCode || "Not configured",
     uppromoteWebhookSecret: config.uppromoteWebhookSecret
       ? "✓ Webhook secret set"
       : "✗ Webhook secret missing"

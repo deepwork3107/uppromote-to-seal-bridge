@@ -29,14 +29,14 @@ if (config.shopifyStore && config.shopifyAdminApiToken) {
  * This creates a price rule + one-time discount code that matches the commission amount.
  *
  * @param {number} discountAmount - The fixed discount amount (e.g., 18.00)
- * @param {string} referralId - The referral ID from UpPromote for unique code generation
- * @param {string} customerEmail - Customer email for tracking/logging
- * @returns {Promise<string>} The created discount code
+ * @param {string|number} referralId - The referral ID from UpPromote for unique code generation
+ * @param {string} customerEmail - Email (used only for logging / title)
+ * @returns {Promise<string>} The created discount code (e.g. "AFFILIATE-26005704")
  */
 async function createDynamicDiscountCode(discountAmount, referralId, customerEmail) {
   if (!shopifyApi) {
     throw new Error(
-      "Shopify API not configured - missing SHOPIFY_STORE or SHOPIFY_ADMIN_API_TOKEN"
+      "Shopify API not configured - missing SHOPIFY_STORE_DOMAIN or SHOPIFY_ADMIN_API_TOKEN"
     );
   }
 
@@ -49,22 +49,22 @@ async function createDynamicDiscountCode(discountAmount, referralId, customerEma
 
   const discountData = {
     price_rule: {
-      title: `Affiliate Credit - Referral ${referralId}`,
+      title: `Affiliate Credit - Referral ${referralId} (${customerEmail || "unknown"})`,
       target_type: "line_item",
       target_selection: "all",
       allocation_method: "across",
       value_type: "fixed_amount",
-      // Shopify expects negative number for discount value
+      // Shopify expects a NEGATIVE number for a discount value
       value: `-${amount}`,
       customer_selection: "all",
       usage_limit: 1, // One-time use
       starts_at: new Date().toISOString(),
       // Valid for 1 year
-      ends_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-      entitled_product_ids: [],
-      entitled_variant_ids: [],
-      entitled_collection_ids: [],
-      entitled_country_ids: [],
+      // ends_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      // entitled_product_ids: [],
+      // entitled_variant_ids: [],
+      // entitled_collection_ids: [],
+      // entitled_country_ids: [],
     },
   };
 
@@ -124,10 +124,10 @@ async function createDynamicDiscountCode(discountAmount, referralId, customerEma
 
 /**
  * Check if a discount code exists in Shopify.
- * Uses the /discount_codes/lookup.json endpoint.
+ * Uses /discount_codes/lookup.json (optional helper).
  *
- * @param {string} discountCode - The discount code to check
- * @returns {Promise<boolean>} True if the code exists
+ * @param {string} discountCode
+ * @returns {Promise<boolean>}
  */
 async function discountCodeExists(discountCode) {
   if (!shopifyApi) {
@@ -135,9 +135,7 @@ async function discountCodeExists(discountCode) {
     return false;
   }
 
-  if (!discountCode) {
-    return false;
-  }
+  if (!discountCode) return false;
 
   try {
     const response = await shopifyApi.get("/discount_codes/lookup.json", {
@@ -146,10 +144,8 @@ async function discountCodeExists(discountCode) {
 
     const exists = !!response.data?.discount_code;
     log("[Shopify] Discount code existence check", { discountCode, exists });
-
     return exists;
   } catch (err) {
-    // Shopify returns 404 if not found; treat that as "does not exist"
     if (err.response?.status === 404) {
       log("[Shopify] Discount code not found", { discountCode });
       return false;
@@ -165,47 +161,26 @@ async function discountCodeExists(discountCode) {
 }
 
 /**
- * Get or create a discount code for the given commission amount.
- * If Shopify API is configured, creates a dynamic discount.
- * Otherwise, falls back to the static discount code from config.
+ * Always create a new dynamic discount code for this commission.
+ * No static fallback.
  *
- * @param {number} commissionAmount - The commission amount to create discount for
- * @param {string} referralId - The referral ID for unique code generation
- * @param {string} customerEmail - Customer email for tracking
- * @returns {Promise<string>} The discount code to use
+ * @param {number} commissionAmount
+ * @param {string|number} referralId
+ * @param {string} customerEmail
+ * @returns {Promise<string>} discountCode
  */
 async function getOrCreateDiscountCode(commissionAmount, referralId, customerEmail) {
   const amount = Number(commissionAmount);
 
-  // If Shopify API is configured, create dynamic discount
-  if (shopifyApi && amount > 0) {
-    try {
-      return await createDynamicDiscountCode(amount, referralId, customerEmail);
-    } catch (err) {
-      error("[Shopify] Failed to create dynamic discount, falling back to static code", {
-        commissionAmount: amount,
-        referralId,
-        error: err.message,
-      });
-      // Fall through to static code fallback
-    }
+  if (!shopifyApi) {
+    throw new Error("Shopify API not configured");
+  }
+  if (!amount || amount <= 0) {
+    throw new Error("Invalid commission amount for discount creation");
   }
 
-  // Fallback to static discount code from configuration
-  const staticCode = config.subscriptionDiscountCode;
-  if (!staticCode) {
-    throw new Error(
-      "No discount code available - neither dynamic creation nor static code configured"
-    );
-  }
-
-  log("[Shopify] Using static discount code fallback", {
-    discountCode: staticCode,
-    commissionAmount: amount,
-    referralId,
-  });
-
-  return staticCode;
+  // Right now we always create a fresh dynamic code per referral
+  return await createDynamicDiscountCode(amount, referralId, customerEmail);
 }
 
 module.exports = {

@@ -5,7 +5,7 @@ const config = {
   uppromoteApiKey: process.env.UPPROMOTE_API_KEY,
   sealApiToken: process.env.SEAL_API_TOKEN,
   webhookSharedSecret: process.env.WEBHOOK_SHARED_SECRET,
-  subscriptionDiscountCode: process.env.SUBSCRIPTION_DISCOUNT_CODE || null,
+  // subscriptionDiscountCode: process.env.SUBSCRIPTION_DISCOUNT_CODE || null,
   uppromoteWebhookSecret: process.env.UPPROMOTE_WEBHOOK_SECRET,
   // Shopify Admin API settings for dynamic discount creation
   shopifyStore: process.env.SHOPIFY_STORE, // e.g., 'your-store.myshopify.com'
