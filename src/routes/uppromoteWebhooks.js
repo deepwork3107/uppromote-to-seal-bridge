@@ -139,10 +139,11 @@ router.post("/referral-approved", async (req, res) => {
         // Commission amount for dynamic discount creation
         const commissionAmount = parseFloat(payload.commission || 0);
 
-        // 6) Find Seal subscriptions and apply discount code(s)
+        // 6) Find Seal ACTIVE subscriptions first; discount + email only run inside
+        // getSubscriptionsAndApplyDiscount when at least one subscription exists (old flow).
         const result = await getSubscriptionsAndApplyDiscount(
           customerEmail,
-          null, // Let the Seal service handle discount code creation
+          null,
           commissionAmount,
           payload.id
         );
@@ -157,6 +158,7 @@ router.post("/referral-approved", async (req, res) => {
           referralId: payload.id,
           commissionAmount,
           subscriptionIds: result.subscriptionIds,
+          alreadyApplied: result.alreadyApplied ? "yes" : "no",
           appliedCount,
           success: result.success
         });

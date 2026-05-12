@@ -4,6 +4,7 @@ const config = require("./config");
 const { log, error } = require("./utils/logger");
 const uppromoteWebhooks = require("./routes/uppromoteWebhooks");
 const sealWebhooks = require("./routes/sealWebhooks");
+const debugEmail = require("./routes/debugEmail");
 
 const app = express();
 
@@ -57,6 +58,11 @@ app.get("/", (req, res) => {
 // -------------------------
 app.use("/webhooks/uppromote", uppromoteWebhooks);
 app.use("/webhooks/seal", sealWebhooks);
+
+if (config.emailTestRouteSecret) {
+  app.use("/debug", debugEmail);
+  log("[Startup] Email test route enabled: POST /debug/send-test-email");
+}
 
 // -------------------------
 // 404 handler
